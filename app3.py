@@ -6,7 +6,7 @@ from huggingface_hub import hf_hub_download, login
 # Login to Hugging Face if token is available
 try:
     if "HUGGINGFACE_TOKEN" in st.secrets:
-        login(token=st.secrets["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"])
+        login(token=st.secrets["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"])
 except:
     pass  # Continue without authentication
     
