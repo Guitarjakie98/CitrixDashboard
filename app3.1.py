@@ -1,3 +1,10 @@
+import os
+from huggingface_hub import login
+
+# Login to Hugging Face if token is available
+if "HUGGINGFACE_TOKEN" in st.secrets:
+    login(token=st.secrets["HUGGINGFACE_TOKEN"])
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
