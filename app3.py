@@ -1,8 +1,12 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from huggingface_hub import hf_hub_download, login
+
 # Login to Hugging Face if token is available
 try:
     if "HUGGINGFACE_TOKEN" in st.secrets:
-        login(token=st.secrets{["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"])
-])
+        login(token=st.secrets["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"])
 except:
     pass  # Continue without authentication
     
