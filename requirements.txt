@@ -1,6 +1,0 @@
-streamlit
-pandas
-plotly
-huggingface_hub
-pyarrow
-requests
