@@ -3,7 +3,7 @@ from huggingface_hub import login
 
 # Login to Hugging Face if token is available
 if "HUGGINGFACE_TOKEN" in st.secrets:
-    login(token=st.secrets["HUGGINGFACE_TOKEN"])
+    login(token=st.secrets["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"])
 
 import streamlit as st
 import pandas as pd
