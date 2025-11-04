@@ -1,7 +1,7 @@
 # Login to Hugging Face if token is available
 try:
     if "HUGGINGFACE_TOKEN" in st.secrets:
-        login(token=st.secrets["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"])
+        login(token=st.secrets{["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"])
 ])
 except:
     pass  # Continue without authentication
