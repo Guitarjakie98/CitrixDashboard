@@ -1,19 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from huggingface_hub import hf_hub_download, login
-
-# Login to Hugging Face if token is available
-try:
-    if "HUGGINGFACE_TOKEN" in st.secrets:
-        login(token=st.secrets["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"])
-except:
-    pass  # Continue without authentication
-    
-import streamlit as st
-import pandas as pd
-import plotly.express as px
-from huggingface_hub import hf_hub_download
+from sqlalchemy import create_engine
+import streamlit.components.v1 as components
 
 # =====================================================
 # PAGE CONFIG
@@ -26,42 +15,39 @@ st.set_page_config(
 st.title("Citrix Data Dashboard")
 
 # =====================================================
-# LOAD DATA — AUTO-DETECT LOCAL, URL, OR HUGGING FACE SOURCE
+# DATABASE CONNECTION
 # =====================================================
-def load_data_auto(path):
-    """Loads data from local, HTTP(S), or Hugging Face dataset repo."""
-    try:
-        if path.startswith("huggingface://"):
-            parts = path.replace("huggingface://", "").split("/")
-            repo_id = f"{parts[0]}/{parts[1]}"
-            filename = "/".join(parts[2:])
-            st.info(f" Downloading data")
-            file_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
-            df = pd.read_parquet(file_path) if filename.endswith(".parquet") else pd.read_csv(file_path)
-            msg = f" Loaded from Hugging Face: {repo_id}/{filename}"
+@st.cache_data
+def get_database_connection():
+    conn_info = st.secrets["connections"]["postgresql"]
+    engine = create_engine(
+        f"postgresql://{conn_info['username']}:{conn_info['password']}@{conn_info['host']}:{conn_info['port']}/{conn_info['database']}"
+    )
+    return engine
 
-        elif path.startswith("http"):
-            df = pd.read_csv(path)
-            msg = f"Loaded from URL: {path}"
+@st.cache_data
+def load_main_data():
+    engine = get_database_connection()
+    return pd.read_sql("SELECT * FROM combined_datastore", engine)
 
-        else:
-            df = pd.read_csv(path)
-            msg = f" Loaded from local file: {path}"
+@st.cache_data  
+def load_firmographics():
+    engine = get_database_connection()
+    return pd.read_sql("SELECT * FROM demandbase_techno_f5", engine)
 
-        return df, msg
-
-    except Exception as e:
-        st.error(f" Error loading {path}: {e}")
-        st.stop()
+@st.cache_data
+def load_contacts():
+    engine = get_database_connection()
+    return pd.read_sql("SELECT * FROM bqresultsno3", engine)
 
 # =====================================================
 # LOAD DATASETS
 # =====================================================
-df, df_msg = load_data_auto("huggingface://Guitarjakie98/CT/combined_cleaned_full.parquet")
+df = load_main_data()
+db_df = load_firmographics() 
+contacts_df = load_contacts()
 
-# Back to the CORRECT paths:
-db_df, db_msg = load_data_auto("huggingface://Guitarjakie98/CT/Demandbase_techno_F5_analysis.csv")
-contacts_df, contacts_msg = load_data_auto("huggingface://Guitarjakie98/CT/bqcontactdata.csv")
+st.sidebar.success("✅ All datasets loaded from PostgreSQL!")
 
 # =====================================================
 # NORMALIZE COLUMN HEADERS AND ALIGN SCHEMAS
@@ -78,7 +64,6 @@ if "account_name" in db_df.columns:
 if "sales_buying_role_code" in contacts_df.columns:
     contacts_df.rename(columns={"sales_buying_role_code": "Buying Role"}, inplace=True)
 
-
 # =====================================================
 # ACCOUNT DROPDOWN
 # =====================================================
@@ -87,11 +72,11 @@ st.sidebar.header("Select an Account")
 if "Account Name" in df.columns:
     account_options = sorted(df["Account Name"].dropna().unique())
     account_choice = st.sidebar.selectbox(
-    "Account (search and select one)",
-    options=[""] + account_options,  # Empty string instead of placeholder text
-    index=0,
-    placeholder="Search and select an account..."  # This shows as placeholder text
-)
+        "Account (search and select one)",
+        options=[""] + account_options,
+        index=0,
+        placeholder="Search and select an account..."
+    )
 else:
     st.error("No 'Account Name' column found in dataset.")
     st.stop()
@@ -102,6 +87,7 @@ if not account_choice:
 
 st.session_state["account_choice"] = account_choice
 
+# [Keep all the rest of your code exactly the same from "FILTER DATA FOR SELECTED ACCOUNT" onwards...]
 # =====================================================
 # FILTER DATA FOR SELECTED ACCOUNT
 # =====================================================
