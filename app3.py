@@ -17,28 +17,47 @@ st.title("Citrix Data Dashboard")
 # =====================================================
 # DATABASE CONNECTION
 # =====================================================
-@st.cache_data
-def get_database_connection():
-    conn_info = st.secrets["connections"]["postgresql"]
-    engine = create_engine(
-        f"postgresql://{conn_info['username']}:{conn_info['password']}@{conn_info['host']}:{conn_info['port']}/{conn_info['database']}"
-    )
-    return engine
+import psycopg2
+from sqlalchemy import create_engine
 
 @st.cache_data
 def load_main_data():
-    engine = get_database_connection()
-    return pd.read_sql("SELECT * FROM combined_datastore", engine)
+    try:
+        conn_info = st.secrets["connections"]["postgresql"]
+        connection_string = f"postgresql://{conn_info['username']}:{conn_info['password']}@{conn_info['host']}:{conn_info['port']}/{conn_info['database']}"
+        engine = create_engine(connection_string)
+        df = pd.read_sql("SELECT * FROM combined_datastore", engine)  # Removed limit for full data
+        engine.dispose()
+        return df
+    except Exception as e:
+        st.error(f"Database connection error: {e}")
+        st.stop()
 
 @st.cache_data  
 def load_firmographics():
-    engine = get_database_connection()
-    return pd.read_sql("SELECT * FROM demandbase_techno_f5", engine)
+    try:
+        conn_info = st.secrets["connections"]["postgresql"]
+        connection_string = f"postgresql://{conn_info['username']}:{conn_info['password']}@{conn_info['host']}:{conn_info['port']}/{conn_info['database']}"
+        engine = create_engine(connection_string)
+        df = pd.read_sql("SELECT * FROM demandbase_techno_f5_analysis", engine)
+        engine.dispose()
+        return df
+    except Exception as e:
+        st.error(f"Database connection error: {e}")
+        st.stop()
 
 @st.cache_data
 def load_contacts():
-    engine = get_database_connection()
-    return pd.read_sql("SELECT * FROM bqresultsno3", engine)
+    try:
+        conn_info = st.secrets["connections"]["postgresql"]
+        connection_string = f"postgresql://{conn_info['username']}:{conn_info['password']}@{conn_info['host']}:{conn_info['port']}/{conn_info['database']}"
+        engine = create_engine(connection_string)
+        df = pd.read_sql("SELECT * FROM bqresultsnov3", engine)
+        engine.dispose()
+        return df
+    except Exception as e:
+        st.error(f"Database connection error: {e}")
+        st.stop()
 
 # =====================================================
 # LOAD DATASETS
@@ -47,7 +66,7 @@ df = load_main_data()
 db_df = load_firmographics() 
 contacts_df = load_contacts()
 
-st.sidebar.success("✅ All datasets loaded from PostgreSQL!")
+st.sidebar.success("All datasets loaded from PostgreSQL!")
 
 # =====================================================
 # NORMALIZE COLUMN HEADERS AND ALIGN SCHEMAS
@@ -56,7 +75,7 @@ df.columns = df.columns.str.strip()
 db_df.columns = db_df.columns.str.strip().str.lower()
 contacts_df.columns = contacts_df.columns.str.strip()
 
-# ✅ Standardize known key columns
+# Standardize known key columns
 if "customerid_nar" in db_df.columns:
     db_df.rename(columns={"customerid_nar": "CustomerId_NAR"}, inplace=True)
 if "account_name" in db_df.columns:
@@ -65,12 +84,86 @@ if "sales_buying_role_code" in contacts_df.columns:
     contacts_df.rename(columns={"sales_buying_role_code": "Buying Role"}, inplace=True)
 
 # =====================================================
+# MERGE DATASETS
+# =====================================================
+if "CustomerId_NAR" in df.columns and "CustomerId_NAR" in db_df.columns:
+    merged = pd.merge(df, db_df, on="CustomerId_NAR", how="left", suffixes=("", "_DB"))
+    st.sidebar.success("Datasets merged successfully!")
+else:
+    st.error("Could not find matching 'CustomerId_NAR' column in both datasets.")
+    merged = df  # Fallback to main dataset
+
+# Handle date columns in merged data
+for col in ["Activity Date", "Activity_DateOnly", "Date"]:
+    if col in merged.columns:
+        merged["__date_col__"] = pd.to_datetime(merged[col], errors="coerce", utc=True)
+        break
+
+# =====================================================
+# TOP 10 ACCOUNTS BY NAMED ENGAGEMENTS
+# =====================================================
+st.subheader("Top 10 Accounts by Named Engagements")
+
+# Find name columns in merged data
+possible_first_cols = ["First Name", "first name", "first_name", "fname", "firstname", "first"]
+possible_last_cols = ["Last Name", "last name", "last_name", "lname", "lastname", "last"]
+
+cols_lower = {c.lower(): c for c in merged.columns}
+first_col = next((cols_lower[c.lower()] for c in possible_first_cols if c.lower() in cols_lower), None)
+last_col = next((cols_lower[c.lower()] for c in possible_last_cols if c.lower() in cols_lower), None)
+
+if first_col and last_col:
+    # Create a copy for the chart with standardized names
+    chart_data = merged.copy()
+    chart_data.rename(columns={first_col: "First Name", last_col: "Last Name"}, inplace=True)
+    
+    named = chart_data[
+        (chart_data["First Name"].notna()) & (chart_data["First Name"].str.strip() != "")
+    ]
+
+    if not named.empty:
+        top_accounts = (
+            named.groupby("Account Name")
+            .size()
+            .reset_index(name="Activity Count")
+            .sort_values(by="Activity Count", ascending=False)
+            .head(10)
+        )
+
+        fig1 = px.bar(
+            top_accounts,
+            x="Account Name",
+            y="Activity Count",
+            text="Activity Count",
+            color="Activity Count",
+            color_continuous_scale="Tealgrn",
+            title="Top 10 Accounts with the Most Named Activities"
+        )
+
+        fig1.update_traces(textposition="outside")
+        fig1.update_layout(
+            xaxis_title="Account Name",
+            yaxis_title="Activity Count",
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis_tickangle=-30,
+            height=500
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+    else:
+        st.info("No records found with associated names.")
+else:
+    st.info("Name columns not found for Top 10 chart.")
+
+st.markdown("---")
+
+# =====================================================
 # ACCOUNT DROPDOWN
 # =====================================================
 st.sidebar.header("Select an Account")
 
-if "Account Name" in df.columns:
-    account_options = sorted(df["Account Name"].dropna().unique())
+if "Account Name" in merged.columns:
+    account_options = sorted(merged["Account Name"].dropna().unique())
     account_choice = st.sidebar.selectbox(
         "Account (search and select one)",
         options=[""] + account_options,
@@ -87,32 +180,21 @@ if not account_choice:
 
 st.session_state["account_choice"] = account_choice
 
-# [Keep all the rest of your code exactly the same from "FILTER DATA FOR SELECTED ACCOUNT" onwards...]
 # =====================================================
-# FILTER DATA FOR SELECTED ACCOUNT
+# FILTER DATA FOR SELECTED ACCOUNT (FIXED)
 # =====================================================
-account_data = df[df["Account Name"] == account_choice].copy()
+account_data = merged[
+    (merged["Account Name"] == account_choice)
+].copy()
+
 if account_data.empty:
     st.warning("No data available for this account.")
     st.stop()
-
-# Normalize date columns
-for col in ["Activity Date", "Activity_DateOnly", "Date"]:
-    if col in account_data.columns:
-        account_data["__date_col__"] = pd.to_datetime(account_data[col], errors="coerce", utc=True)
-        break
 
 # =====================================================
 # ENGAGEMENT TIMELINE
 # =====================================================
 st.subheader(f"Engagement Timeline for {account_choice}")
-
-possible_first_cols = ["First Name", "first name", "first_name", "fname", "firstname", "first"]
-possible_last_cols = ["Last Name", "last name", "last_name", "lname", "lastname", "last"]
-
-cols_lower = {c.lower(): c for c in account_data.columns}
-first_col = next((cols_lower[c.lower()] for c in possible_first_cols if c.lower() in cols_lower), None)
-last_col = next((cols_lower[c.lower()] for c in possible_last_cols if c.lower() in cols_lower), None)
 
 if not first_col or not last_col:
     st.error(f"❌ Could not find name columns in dataset. Columns available: {list(account_data.columns)[:50]}")
@@ -124,7 +206,7 @@ named = account_data[(account_data["First Name"].notna()) & (account_data["First
 if not named.empty:
     named["Name + Role"] = named.apply(
         lambda x: f"{x['First Name']} {x['Last Name']} - {x['Buying Role']}"
-        if pd.notna(x["Buying Role"]) and str(x["Buying Role"]).strip() != ""
+        if pd.notna(x.get("Buying Role")) and str(x.get("Buying Role", "")).strip() != ""
         else f"{x['First Name']} {x['Last Name']}", axis=1
     )
 
@@ -135,7 +217,7 @@ if not named.empty:
         color="First Name",
         symbol="Type" if "Type" in named.columns else None,
         hover_data={
-            "Type": True,
+            "Type": True if "Type" in named.columns else False,
             "Details": True if "Details" in named.columns else False,
             "__date_col__": "|%Y-%m-%d"
         },
@@ -159,42 +241,38 @@ else:
 # =====================================================
 st.subheader("Firmographics")
 
-# Both datasets have CustomerId_NAR - let's join on that
-if "CustomerId_NAR" in df.columns and "CustomerId_NAR" in db_df.columns:
-    # Get the CustomerId_NAR values from the selected account
-    account_customer_ids = df.loc[df["Account Name"] == account_choice, "CustomerId_NAR"].dropna().unique()
+# Get the CustomerId_NAR values from the selected account
+account_customer_ids = merged.loc[merged["Account Name"] == account_choice, "CustomerId_NAR"].dropna().unique()
+
+# Find matching firmographics data
+firmographics = db_df[db_df["CustomerId_NAR"].isin(account_customer_ids)]
+
+if not firmographics.empty:
+    # Remove columns that are completely empty or contain only NaN/empty strings
+    non_empty_cols = []
+    for col in firmographics.columns:
+        if firmographics[col].notna().any() and (firmographics[col] != "").any():
+            non_empty_cols.append(col)
     
-    # Find matching firmographics data
-    firmographics = db_df[db_df["CustomerId_NAR"].isin(account_customer_ids)]
+    # Filter to only non-empty columns
+    firmographics_clean = firmographics[non_empty_cols]
     
-    if not firmographics.empty:
-        # Remove columns that are completely empty or contain only NaN/empty strings
-        non_empty_cols = []
-        for col in firmographics.columns:
-            if firmographics[col].notna().any() and (firmographics[col] != "").any():
-                non_empty_cols.append(col)
-        
-        # Filter to only non-empty columns
-        firmographics_clean = firmographics[non_empty_cols]
-        
-        # Show with bigger row height and scrollable
-        st.dataframe(
-            firmographics_clean,
-            use_container_width=True,
-            height=200,  # Bigger single row height
-            column_config={
-                col: st.column_config.TextColumn(
-                    width="medium",
-                    help=f"Data for {col}"
-                ) for col in firmographics_clean.columns
-            }
-        )
-        
-        st.caption(f"Showing {len(firmographics_clean)} firmographics records with {len(non_empty_cols)} non-empty columns")
-    else:
-        st.info("No firmographics data found for this account.")
+    # Show with bigger row height and scrollable
+    st.dataframe(
+        firmographics_clean,
+        use_container_width=True,
+        height=200,
+        column_config={
+            col: st.column_config.TextColumn(
+                width="medium",
+                help=f"Data for {col}"
+            ) for col in firmographics_clean.columns
+        }
+    )
+    
+    st.caption(f"Showing {len(firmographics_clean)} firmographics records with {len(non_empty_cols)} non-empty columns")
 else:
-    st.warning("CustomerId_NAR column missing from one of the datasets.")
+    st.info("No firmographics data found for this account.")
 
 # =====================================================
 # CONTACTS SECTION
@@ -212,16 +290,16 @@ def normalize_id(x):
     return str(x).strip().upper().replace("H-CIT-", "").replace("H-", "").replace("CIT-", "")
 
 contacts_df["party_number_clean"] = contacts_df[contact_key].apply(normalize_id)
-df["CustomerId_NAR_clean"] = df["CustomerId_NAR"].apply(normalize_id)
+merged["CustomerId_NAR_clean"] = merged["CustomerId_NAR"].apply(normalize_id)
 
-matching_ids = df.loc[df["Account Name"] == account_choice, "CustomerId_NAR_clean"].dropna().unique()
+matching_ids = merged.loc[merged["Account Name"] == account_choice, "CustomerId_NAR_clean"].dropna().unique()
 account_contacts = contacts_df[contacts_df["party_number_clean"].isin(matching_ids)].copy()
 
 # Derive engagement matches
 engaged_names = set(zip(
     named["First Name"].fillna("").str.strip().str.lower(),
     named["Last Name"].fillna("").str.strip().str.lower(),
-))
+)) if not named.empty else set()
 
 def has_engaged_match(row):
     parts = str(row.get("party_unique_name", "")).strip().split()
@@ -261,7 +339,6 @@ if search_query and "party_unique_name" in filtered_contacts.columns:
     filtered_contacts = filtered_contacts[
         filtered_contacts["party_unique_name"].astype(str).str.lower().str.contains(search_query, na=False)
     ]
-import streamlit.components.v1 as components
 
 # =====================================================
 # CONTACT TILES - SMALLER WITH TOP FILTER
@@ -370,6 +447,7 @@ else:
     # Render using components
     components.html(tiles_html, height=500, scrolling=True)
 
+    
 
 
 
