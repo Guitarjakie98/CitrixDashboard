@@ -1,6 +1,5 @@
 streamlit
 pandas
 plotly
-huggingface_hub
-pyarrow
-requests
+psycopg2-binary
+sqlalchemy
