@@ -41,7 +41,7 @@ def load_account_list():
             ORDER BY activity_count DESC
         """, engine)
         engine.dispose()
-        st.sidebar.success(f"✅ Found {len(df):,} accounts")
+        st.sidebar.success(f"Found {len(df):,} accounts")
         return df
     except Exception as e:
         st.error(f"Error loading accounts: {e}")
