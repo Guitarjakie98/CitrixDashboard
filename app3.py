@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.express as px
 from sqlalchemy import create_engine
 import streamlit.components.v1 as components
+import io
+from datetime import datetime, timedelta
 
 # =====================================================
 # PAGE CONFIG
@@ -23,7 +25,7 @@ def get_db_connection():
     return f"postgresql://{conn_info['username']}:{conn_info['password']}@{conn_info['host']}:{conn_info['port']}/{conn_info['database']}"
 
 # =====================================================
-# LOAD ACCOUNT LIST ONLY
+# DATA LOADING FUNCTIONS
 # =====================================================
 @st.cache_data
 def load_account_list():
@@ -41,15 +43,12 @@ def load_account_list():
             ORDER BY activity_count DESC
         """, engine)
         engine.dispose()
-        st.sidebar.success(f"Found {len(df):,} accounts")
+        # Removed st.sidebar.success here to avoid cluttering the UI in tab view
         return df
     except Exception as e:
         st.error(f"Error loading accounts: {e}")
         return pd.DataFrame()
 
-# =====================================================
-# LOAD DATA FOR SELECTED ACCOUNT
-# =====================================================
 @st.cache_data
 def load_account_data(account_name):
     """Load all data for a specific account"""
@@ -122,317 +121,447 @@ def load_account_contacts(customer_ids):
         st.error(f"Error loading contacts: {e}")
         return pd.DataFrame()
 
-# =====================================================
-# TOP 10 ACCOUNTS (FROM SUMMARY)
-# =====================================================
-st.subheader("Top 10 Accounts by Named Engagements")
-
-account_summary = load_account_list()
-
-if not account_summary.empty:
-    top_accounts = account_summary.nlargest(10, 'named_activities')
+# NEW: Bulk loading function for Tab 2
+@st.cache_data
+def load_bulk_account_data(account_names):
+    """Load data for multiple accounts at once"""
+    if not account_names:
+        return pd.DataFrame()
     
-    fig1 = px.bar(
-        top_accounts,
-        x="Account Name",
-        y="named_activities",
-        text="named_activities",
-        color="named_activities",
-        color_continuous_scale="Tealgrn",
-        title="Top 10 Accounts with the Most Named Activities"
-    )
-
-    fig1.update_traces(textposition="outside")
-    fig1.update_layout(
-        xaxis_title="Account Name",
-        yaxis_title="Named Activity Count",
-        showlegend=False,
-        plot_bgcolor="rgba(0,0,0,0)",
-        xaxis_tickangle=-30,
-        height=500
-    )
-    st.plotly_chart(fig1, use_container_width=True)
-else:
-    st.error("Could not load account summary")
-
-st.markdown("---")
-
-# =====================================================
-# ACCOUNT DROPDOWN
-# =====================================================
-st.sidebar.header("Select an Account")
-
-if not account_summary.empty:
-    # Create a nice display format for the dropdown
-    account_summary['display_name'] = account_summary.apply(
-        lambda x: f"{x['Account Name']} ({x['activity_count']:,} activities)", axis=1
-    )
-    
-    account_choice = st.sidebar.selectbox(
-        "Account (search and select one)",
-        options=[""] + account_summary['display_name'].tolist(),
-        index=0,
-        placeholder="Search and select an account..."
-    )
-    
-    # Extract the actual account name
-    if account_choice:
-        selected_account = account_choice.split(" (")[0]  # Remove the activity count part
-    else:
-        selected_account = ""
-else:
-    st.error("No accounts available.")
-    st.stop()
-
-if not selected_account:
-    st.info("Please select an account to view its detailed data.")
-    st.stop()
-
-# =====================================================
-# LOAD DATA FOR SELECTED ACCOUNT
-# =====================================================
-with st.spinner(f"Loading data for {selected_account}..."):
-    account_data = load_account_data(selected_account)
-
-if account_data.empty:
-    st.warning(f"No data found for {selected_account}")
-    st.stop()
-
-# Normalize columns
-account_data.columns = account_data.columns.str.strip()
-
-# Handle date columns
-for col in ["Activity Date", "Activity_DateOnly", "Date"]:
-    if col in account_data.columns:
-        account_data["__date_col__"] = pd.to_datetime(account_data[col], errors="coerce", utc=True)
-        break
-
-st.sidebar.success(f"✅ Loaded {len(account_data):,} records for {selected_account}")
-
-# =====================================================
-# ENGAGEMENT TIMELINE
-# =====================================================
-st.subheader(f"Engagement Timeline for {selected_account}")
-
-# Find name columns
-possible_first_cols = ["First Name", "first name", "first_name", "fname", "firstname", "first"]
-possible_last_cols = ["Last Name", "last name", "last_name", "lname", "lastname", "last"]
-
-cols_lower = {c.lower(): c for c in account_data.columns}
-first_col = next((cols_lower[c.lower()] for c in possible_first_cols if c.lower() in cols_lower), None)
-last_col = next((cols_lower[c.lower()] for c in possible_last_cols if c.lower() in cols_lower), None)
-
-if first_col and last_col:
-    account_data.rename(columns={first_col: "First Name", last_col: "Last Name"}, inplace=True)
-    named = account_data[(account_data["First Name"].notna()) & (account_data["First Name"].str.strip() != "")]
-
-    if not named.empty:
-        # Add buying role if available
-        if "sales_buying_role_code" in account_data.columns:
-            account_data.rename(columns={"sales_buying_role_code": "Buying Role"}, inplace=True)
+    try:
+        connection_string = get_db_connection()
+        engine = create_engine(connection_string)
         
-        named["Name + Role"] = named.apply(
-            lambda x: f"{x['First Name']} {x['Last Name']} - {x.get('Buying Role', 'Unknown Role')}"
-            if pd.notna(x.get("Buying Role")) and str(x.get("Buying Role", "")).strip() != ""
-            else f"{x['First Name']} {x['Last Name']}", axis=1
+        # Create safe SQL list
+        names_str = "','".join([str(n).replace("'", "''") for n in account_names])
+        
+        main_df = pd.read_sql(f"""
+            SELECT * FROM combined_datastore 
+            WHERE "Account Name" IN ('{names_str}')
+        """, engine)
+        
+        engine.dispose()
+        return main_df
+    except Exception as e:
+        st.error(f"Error loading bulk data: {e}")
+        return pd.DataFrame()
+
+# =====================================================
+# TAB STRUCTURE
+# =====================================================
+tab_dashboard, tab_export = st.tabs(["📊 Account Deep Dive", "📥 Data Export"])
+
+# =====================================================
+# TAB 1: EXISTING DASHBOARD (Your Original Code)
+# =====================================================
+with tab_dashboard:
+    # =====================================================
+    # TOP 10 ACCOUNTS (FROM SUMMARY)
+    # =====================================================
+    st.subheader("Top 10 Accounts by Named Engagements")
+
+    account_summary = load_account_list()
+
+    if not account_summary.empty:
+        top_accounts = account_summary.nlargest(10, 'named_activities')
+        
+        fig1 = px.bar(
+            top_accounts,
+            x="Account Name",
+            y="named_activities",
+            text="named_activities",
+            color="named_activities",
+            color_continuous_scale="Tealgrn",
+            title="Top 10 Accounts with the Most Named Activities"
         )
 
-        fig = px.scatter(
-            named,
-            x="__date_col__",
-            y="Name + Role",
-            color="First Name",
-            symbol="Type" if "Type" in named.columns else None,
-            hover_data={
-                "Type": True if "Type" in named.columns else False,
-                "Details": True if "Details" in named.columns else False,
-                "__date_col__": "|%Y-%m-%d"
-            },
-            title=f"Engagement Timeline for {selected_account}",
-            height=600
-        )
-
-        fig.update_layout(
-            yaxis_title="Name + Buying Role",
-            xaxis_title="Engagement Date",
+        fig1.update_traces(textposition="outside")
+        fig1.update_layout(
+            xaxis_title="Account Name",
+            yaxis_title="Named Activity Count",
+            showlegend=False,
             plot_bgcolor="rgba(0,0,0,0)",
-            legend_title="Person / Type",
-            hovermode="closest"
+            xaxis_tickangle=-30,
+            height=500
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig1, use_container_width=True)
     else:
-        st.info("No named engagements found for this account.")
-else:
-    st.info("Name columns not found in the data.")
+        st.error("Could not load account summary")
 
-# =====================================================
-# FIRMOGRAPHICS
-# =====================================================
-st.subheader("Firmographics")
+    st.markdown("---")
 
-# Get customer IDs for this account
-customer_ids = account_data["CustomerId_NAR"].dropna().unique().tolist()
+    # =====================================================
+    # ACCOUNT DROPDOWN (Sidebar logic kept here)
+    # =====================================================
+    st.sidebar.header("Select an Account")
 
-if customer_ids:
-    with st.spinner("Loading firmographics..."):
-        firmographics = load_account_firmographics(customer_ids)
-    
-    if not firmographics.empty:
-        # Clean up columns
-        firmographics.columns = firmographics.columns.str.strip().str.lower()
-        
-        # Remove empty columns
-        non_empty_cols = []
-        for col in firmographics.columns:
-            if firmographics[col].notna().any() and (firmographics[col] != "").any():
-                non_empty_cols.append(col)
-        
-        firmographics_clean = firmographics[non_empty_cols]
-        
-        st.dataframe(
-            firmographics_clean,
-            use_container_width=True,
-            height=200
+    if not account_summary.empty:
+        # Create a nice display format for the dropdown
+        account_summary['display_name'] = account_summary.apply(
+            lambda x: f"{x['Account Name']} ({x['activity_count']:,} activities)", axis=1
         )
         
-        st.caption(f"Showing {len(firmographics_clean)} firmographics records")
-    else:
-        st.info("No firmographics data found for this account.")
-else:
-    st.info("No Customer IDs found for firmographics lookup.")
-
-# =====================================================
-# CONTACTS
-# =====================================================
-st.subheader(f"Contacts for {selected_account}")
-
-if customer_ids:
-    with st.spinner("Loading contacts..."):
-        contacts_df = load_account_contacts(customer_ids)
-    
-    if not contacts_df.empty:
-        # Clean up columns
-        contacts_df.columns = contacts_df.columns.str.strip()
-        
-        # Match engaged names
-        engaged_names = set()
-        if not named.empty:
-            engaged_names = set(zip(
-                named["First Name"].fillna("").str.strip().str.lower(),
-                named["Last Name"].fillna("").str.strip().str.lower(),
-            ))
-
-        def has_engaged_match(row):
-            parts = str(row.get("party_unique_name", "")).strip().split()
-            if len(parts) >= 2:
-                first, last = parts[0].lower(), parts[-1].lower()
-                return (first, last) in engaged_names
-            return False
-
-        contacts_df["is_engaged"] = contacts_df.apply(has_engaged_match, axis=1)
-
-        # Add status colors
-        def get_status_color(row):
-            affinity = str(row.get("sales_affinity_code", "")).strip()
-            if affinity and affinity != "nan":
-                return "purple"
-            if row.get("is_engaged", False):
-                return "yellow"
-            return "red"
-
-        contacts_df["status_color"] = contacts_df.apply(get_status_color, axis=1)
-        
-        # Contact filters
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Contact Filters")
-
-        color_filter = st.sidebar.multiselect(
-            "Show colors:", ["red", "yellow", "purple"],
-            default=["red", "yellow", "purple"],
+        account_choice = st.sidebar.selectbox(
+            "Account (search and select one)",
+            options=[""] + account_summary['display_name'].tolist(),
+            index=0,
+            placeholder="Search and select an account..."
         )
-        search_query = st.sidebar.text_input("🔎 Search name").strip().lower()
-
-        filtered_contacts = contacts_df[contacts_df["status_color"].isin(color_filter)].copy()
-        if search_query and "party_unique_name" in filtered_contacts.columns:
-            filtered_contacts = filtered_contacts[
-                filtered_contacts["party_unique_name"].astype(str).str.lower().str.contains(search_query, na=False)
-            ]
-
-        if not filtered_contacts.empty:
-            # Summary metrics
-            has_affinity = filtered_contacts['sales_affinity_code'].notna() & (filtered_contacts['sales_affinity_code'].str.strip() != "") & (filtered_contacts['sales_affinity_code'] != "nan")
-            purple_count = len(filtered_contacts[has_affinity])
-            red_count = len(filtered_contacts[~has_affinity])
-            yellow_dot_count = len(filtered_contacts[filtered_contacts['is_engaged'] == True])
-            total_count = len(filtered_contacts)
-            
-            # Display metrics
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("With Affinity", purple_count)
-            col2.metric("No Affinity", red_count)
-            col3.metric("Marketing Engaged", yellow_dot_count)
-            col4.metric("Total", total_count)
-            
-            # Contact tiles (keeping your existing tile code)
-            tiles_html = """
-            <div style="display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;">
-            """
-            
-            for _, contact in filtered_contacts.iterrows():
-                name = contact.get("party_unique_name", "Unknown")
-                title = contact.get("job_title", "")
-                affinity = contact.get("sales_affinity_code", "")
-                is_engaged = contact.get("is_engaged", False)
-                
-                display_title = title if pd.notna(title) and str(title).strip() != "nan" else "No Title"
-                display_affinity = affinity if pd.notna(affinity) and str(affinity).strip() != "nan" else ""
-                
-                if display_affinity:
-                    bg_color = "#4c1d95"
-                    border_color = "#5b21b6"
-                else:
-                    bg_color = "#991b1b"
-                    border_color = "#b91c1c"
-                
-                yellow_dot = """
-                <div style="position: absolute; top: 6px; left: 6px; width: 10px; height: 10px; 
-                           background: #d97706; border-radius: 50%; border: 1px solid white;"></div>
-                """ if is_engaged else ""
-                
-                tiles_html += f"""
-                <div style="
-                    background: {bg_color}; 
-                    color: white; 
-                    padding: 12px; 
-                    border-radius: 6px; 
-                    border: 2px solid {border_color}; 
-                    width: 150px; 
-                    height: 90px; 
-                    position: relative;
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: center;
-                    text-align: center;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-                ">
-                    {yellow_dot}
-                    <div style="font-weight: 600; font-size: 13px; margin-bottom: 4px; line-height: 1.1;">{name}</div>
-                    <div style="font-size: 10px; margin-bottom: 3px; opacity: 0.9; line-height: 1.0;">
-                        {display_affinity.replace('_', ' ').title() if display_affinity else 'No Affinity'}
-                    </div>
-                    <div style="font-size: 11px; opacity: 0.95; line-height: 1.0;">{display_title}</div>
-                </div>
-                """
-            
-            tiles_html += "</div>"
-            components.html(tiles_html, height=500, scrolling=True)
+        
+        # Extract the actual account name
+        if account_choice:
+            selected_account = account_choice.split(" (")[0]  # Remove the activity count part
         else:
-            st.info("No contacts match your filters.")
+            selected_account = ""
     else:
-        st.info("No contacts found for this account.")
-else:
-    st.info("No Customer IDs available for contact lookup.")
+        st.error("No accounts available.")
+        st.stop()
+
+    # Only run the deep dive logic if an account is selected
+    if selected_account:
+        # =====================================================
+        # LOAD DATA FOR SELECTED ACCOUNT
+        # =====================================================
+        with st.spinner(f"Loading data for {selected_account}..."):
+            account_data = load_account_data(selected_account)
+
+        if account_data.empty:
+            st.warning(f"No data found for {selected_account}")
+            st.stop()
+
+        # Normalize columns
+        account_data.columns = account_data.columns.str.strip()
+
+        # Handle date columns
+        for col in ["Activity Date", "Activity_DateOnly", "Date"]:
+            if col in account_data.columns:
+                account_data["__date_col__"] = pd.to_datetime(account_data[col], errors="coerce", utc=True)
+                break
+
+        st.sidebar.success(f"✅ Loaded {len(account_data):,} records for {selected_account}")
+
+        # =====================================================
+        # ENGAGEMENT TIMELINE
+        # =====================================================
+        st.subheader(f"Engagement Timeline for {selected_account}")
+
+        # Find name columns
+        possible_first_cols = ["First Name", "first name", "first_name", "fname", "firstname", "first"]
+        possible_last_cols = ["Last Name", "last name", "last_name", "lname", "lastname", "last"]
+
+        cols_lower = {c.lower(): c for c in account_data.columns}
+        first_col = next((cols_lower[c.lower()] for c in possible_first_cols if c.lower() in cols_lower), None)
+        last_col = next((cols_lower[c.lower()] for c in possible_last_cols if c.lower() in cols_lower), None)
+
+        if first_col and last_col:
+            account_data.rename(columns={first_col: "First Name", last_col: "Last Name"}, inplace=True)
+            named = account_data[(account_data["First Name"].notna()) & (account_data["First Name"].str.strip() != "")]
+
+            if not named.empty:
+                # Add buying role if available
+                if "sales_buying_role_code" in account_data.columns:
+                    account_data.rename(columns={"sales_buying_role_code": "Buying Role"}, inplace=True)
+                
+                named["Name + Role"] = named.apply(
+                    lambda x: f"{x['First Name']} {x['Last Name']} - {x.get('Buying Role', 'Unknown Role')}"
+                    if pd.notna(x.get("Buying Role")) and str(x.get("Buying Role", "")).strip() != ""
+                    else f"{x['First Name']} {x['Last Name']}", axis=1
+                )
+
+                fig = px.scatter(
+                    named,
+                    x="__date_col__",
+                    y="Name + Role",
+                    color="First Name",
+                    symbol="Type" if "Type" in named.columns else None,
+                    hover_data={
+                        "Type": True if "Type" in named.columns else False,
+                        "Details": True if "Details" in named.columns else False,
+                        "__date_col__": "|%Y-%m-%d"
+                    },
+                    title=f"Engagement Timeline for {selected_account}",
+                    height=600
+                )
+
+                fig.update_layout(
+                    yaxis_title="Name + Buying Role",
+                    xaxis_title="Engagement Date",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    legend_title="Person / Type",
+                    hovermode="closest"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No named engagements found for this account.")
+        else:
+            st.info("Name columns not found in the data.")
+
+        # =====================================================
+        # FIRMOGRAPHICS
+        # =====================================================
+        st.subheader("Firmographics")
+
+        # Get customer IDs for this account
+        customer_ids = account_data["CustomerId_NAR"].dropna().unique().tolist()
+
+        if customer_ids:
+            with st.spinner("Loading firmographics..."):
+                firmographics = load_account_firmographics(customer_ids)
+            
+            if not firmographics.empty:
+                # Clean up columns
+                firmographics.columns = firmographics.columns.str.strip().str.lower()
+                
+                # Remove empty columns
+                non_empty_cols = []
+                for col in firmographics.columns:
+                    if firmographics[col].notna().any() and (firmographics[col] != "").any():
+                        non_empty_cols.append(col)
+                
+                firmographics_clean = firmographics[non_empty_cols]
+                
+                st.dataframe(
+                    firmographics_clean,
+                    use_container_width=True,
+                    height=200
+                )
+                
+                st.caption(f"Showing {len(firmographics_clean)} firmographics records")
+            else:
+                st.info("No firmographics data found for this account.")
+        else:
+            st.info("No Customer IDs found for firmographics lookup.")
+
+        # =====================================================
+        # CONTACTS
+        # =====================================================
+        st.subheader(f"Contacts for {selected_account}")
+
+        if customer_ids:
+            with st.spinner("Loading contacts..."):
+                contacts_df = load_account_contacts(customer_ids)
+            
+            if not contacts_df.empty:
+                # Clean up columns
+                contacts_df.columns = contacts_df.columns.str.strip()
+                
+                # Match engaged names
+                engaged_names = set()
+                if not named.empty:
+                    engaged_names = set(zip(
+                        named["First Name"].fillna("").str.strip().str.lower(),
+                        named["Last Name"].fillna("").str.strip().str.lower(),
+                    ))
+
+                def has_engaged_match(row):
+                    parts = str(row.get("party_unique_name", "")).strip().split()
+                    if len(parts) >= 2:
+                        first, last = parts[0].lower(), parts[-1].lower()
+                        return (first, last) in engaged_names
+                    return False
+
+                contacts_df["is_engaged"] = contacts_df.apply(has_engaged_match, axis=1)
+
+                # Add status colors
+                def get_status_color(row):
+                    affinity = str(row.get("sales_affinity_code", "")).strip()
+                    if affinity and affinity != "nan":
+                        return "purple"
+                    if row.get("is_engaged", False):
+                        return "yellow"
+                    return "red"
+
+                contacts_df["status_color"] = contacts_df.apply(get_status_color, axis=1)
+                
+                # Contact filters
+                st.sidebar.markdown("---")
+                st.sidebar.subheader("Contact Filters")
+
+                color_filter = st.sidebar.multiselect(
+                    "Show colors:", ["red", "yellow", "purple"],
+                    default=["red", "yellow", "purple"],
+                    key="contact_colors_tab1" # Added key to avoid conflict
+                )
+                search_query = st.sidebar.text_input("🔎 Search name", key="contact_search_tab1").strip().lower()
+
+                filtered_contacts = contacts_df[contacts_df["status_color"].isin(color_filter)].copy()
+                if search_query and "party_unique_name" in filtered_contacts.columns:
+                    filtered_contacts = filtered_contacts[
+                        filtered_contacts["party_unique_name"].astype(str).str.lower().str.contains(search_query, na=False)
+                    ]
+
+                if not filtered_contacts.empty:
+                    # Summary metrics
+                    has_affinity = filtered_contacts['sales_affinity_code'].notna() & (filtered_contacts['sales_affinity_code'].str.strip() != "") & (filtered_contacts['sales_affinity_code'] != "nan")
+                    purple_count = len(filtered_contacts[has_affinity])
+                    red_count = len(filtered_contacts[~has_affinity])
+                    yellow_dot_count = len(filtered_contacts[filtered_contacts['is_engaged'] == True])
+                    total_count = len(filtered_contacts)
+                    
+                    # Display metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("With Affinity", purple_count)
+                    col2.metric("No Affinity", red_count)
+                    col3.metric("Marketing Engaged", yellow_dot_count)
+                    col4.metric("Total", total_count)
+                    
+                    # Contact tiles (keeping your existing tile code)
+                    tiles_html = """
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;">
+                    """
+                    
+                    for _, contact in filtered_contacts.iterrows():
+                        name = contact.get("party_unique_name", "Unknown")
+                        title = contact.get("job_title", "")
+                        affinity = contact.get("sales_affinity_code", "")
+                        is_engaged = contact.get("is_engaged", False)
+                        
+                        display_title = title if pd.notna(title) and str(title).strip() != "nan" else "No Title"
+                        display_affinity = affinity if pd.notna(affinity) and str(affinity).strip() != "nan" else ""
+                        
+                        if display_affinity:
+                            bg_color = "#4c1d95"
+                            border_color = "#5b21b6"
+                        else:
+                            bg_color = "#991b1b"
+                            border_color = "#b91c1c"
+                        
+                        yellow_dot = """
+                        <div style="position: absolute; top: 6px; left: 6px; width: 10px; height: 10px; 
+                                    background: #d97706; border-radius: 50%; border: 1px solid white;"></div>
+                        """ if is_engaged else ""
+                        
+                        tiles_html += f"""
+                        <div style="
+                            background: {bg_color}; 
+                            color: white; 
+                            padding: 12px; 
+                            border-radius: 6px; 
+                            border: 2px solid {border_color}; 
+                            width: 150px; 
+                            height: 90px; 
+                            position: relative;
+                            display: flex;
+                            flex-direction: column;
+                            justify-content: center;
+                            text-align: center;
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                        ">
+                            {yellow_dot}
+                            <div style="font-weight: 600; font-size: 13px; margin-bottom: 4px; line-height: 1.1;">{name}</div>
+                            <div style="font-size: 10px; margin-bottom: 3px; opacity: 0.9; line-height: 1.0;">
+                                {display_affinity.replace('_', ' ').title() if display_affinity else 'No Affinity'}
+                            </div>
+                            <div style="font-size: 11px; opacity: 0.95; line-height: 1.0;">{display_title}</div>
+                        </div>
+                        """
+                    
+                    tiles_html += "</div>"
+                    components.html(tiles_html, height=500, scrolling=True)
+                else:
+                    st.info("No contacts match your filters.")
+            else:
+                st.info("No contacts found for this account.")
+        else:
+            st.info("No Customer IDs available for contact lookup.")
+    elif selected_account == "":
+         st.info("Please select an account to view its detailed data.")
+
+# =====================================================
+# TAB 2: DATA EXPORT (New Feature)
+# =====================================================
+with tab_export:
+    st.header("Bulk Data Export")
+    
+    # 1. Input Section
+    col_input, col_filters = st.columns(2)
+    
+    with col_input:
+        st.subheader("1. Select Accounts")
+        # Multi-select for easy searching
+        available_accounts = account_summary['Account Name'].tolist() if not account_summary.empty else []
+        selected_from_dropdown = st.multiselect("Search & Select Accounts", available_accounts)
+        
+        # Text area for pasting
+        pasted_text = st.text_area("Or Paste Account Names (one per line)", height=150, 
+                                 placeholder="Account A\nAccount B\nAccount C")
+        
+    with col_filters:
+        st.subheader("2. Filter Activity Data")
+        # Date Logic
+        today = datetime.now()
+        last_year = today - timedelta(days=365)
+        date_range = st.date_input("Activity Date Range", [last_year, today])
+
+    # Combine Selections
+    pasted_list = [x.strip() for x in pasted_text.split('\n') if x.strip()]
+    final_selection = list(set(selected_from_dropdown + pasted_list))
+    
+    if final_selection:
+        st.success(f"Selected {len(final_selection)} accounts for export.")
+        
+        # Load Bulk Data
+        with st.spinner("Fetching bulk data..."):
+            bulk_activity_df = load_bulk_account_data(final_selection)
+            
+        if not bulk_activity_df.empty:
+            # 2. Filter Activity by Date
+            bulk_activity_df.columns = bulk_activity_df.columns.str.strip()
+            date_col_found = None
+            for col in ["Activity Date", "Activity_DateOnly", "Date"]:
+                if col in bulk_activity_df.columns:
+                    date_col_found = col
+                    bulk_activity_df[col] = pd.to_datetime(bulk_activity_df[col], errors='coerce', utc=True)
+                    break
+            
+            filtered_activity = bulk_activity_df.copy()
+            if date_col_found and len(date_range) == 2:
+                start_date = pd.to_datetime(date_range[0]).tz_localize('UTC')
+                end_date = pd.to_datetime(date_range[1]).tz_localize('UTC') + pd.Timedelta(days=1)
+                
+                filtered_activity = filtered_activity[
+                    (filtered_activity[date_col_found] >= start_date) & 
+                    (filtered_activity[date_col_found] <= end_date)
+                ]
+
+            # 3. Load Contacts (All contacts for these accounts)
+            all_cust_ids = bulk_activity_df["CustomerId_NAR"].dropna().unique().tolist()
+            bulk_contacts_df = load_account_contacts(all_cust_ids)
+
+            # 4. Display Previews
+            st.markdown("### Data Preview")
+            t1, t2 = st.tabs(["Account Activity (Filtered)", "All Contacts (Unfiltered)"])
+            
+            with t1:
+                st.dataframe(filtered_activity, use_container_width=True)
+                st.caption(f"{len(filtered_activity)} rows | Date Filter: {date_range}")
+                
+            with t2:
+                st.dataframe(bulk_contacts_df, use_container_width=True)
+                st.caption(f"{len(bulk_contacts_df)} contacts found for selected accounts")
+
+            # 5. Export Button (Excel)
+            st.markdown("### Export")
+            
+            # Create Excel in memory
+            buffer = io.BytesIO()
+            # Use xlsxwriter if available, otherwise default
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                filtered_activity.to_excel(writer, sheet_name='Account Activity', index=False)
+                bulk_contacts_df.to_excel(writer, sheet_name='Contacts', index=False)
+                
+            st.download_button(
+                label="📥 Download Excel Report (.xlsx)",
+                data=buffer.getvalue(),
+                file_name=f"citrix_export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
+
+        else:
+            st.warning("No data found for the selected accounts.")
+    else:
+        st.info("Please select or paste accounts to begin.")
 
 
     
