@@ -370,11 +370,22 @@ with tab_export:
 
             st.markdown("### Export")
             
-            # --- CRITICAL FIX FOR EXCEL ERROR ---
-            # Excel cannot handle "Timezone Aware" dates (like +00:00). 
-            # We must strip the timezone before saving.
-            if date_col_found and date_col_found in filtered_activity.columns:
-                filtered_activity[date_col_found] = filtered_activity[date_col_found].dt.tz_localize(None)
+            # --- ULTIMATE TIMEZONE FIX ---
+            # Iterate through ALL columns in both tables. 
+            # If any column is a datetime with timezone info (UTC), strip it.
+            # This guarantees Excel compliance for every single column.
+            
+            # 1. Clean Activity Data
+            for col in filtered_activity.columns:
+                if pd.api.types.is_datetime64_any_dtype(filtered_activity[col]):
+                    if filtered_activity[col].dt.tz is not None:
+                        filtered_activity[col] = filtered_activity[col].dt.tz_localize(None)
+
+            # 2. Clean Contact Data
+            for col in bulk_contacts_df.columns:
+                if pd.api.types.is_datetime64_any_dtype(bulk_contacts_df[col]):
+                     if bulk_contacts_df[col].dt.tz is not None:
+                        bulk_contacts_df[col] = bulk_contacts_df[col].dt.tz_localize(None)
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer) as writer:
@@ -392,5 +403,3 @@ with tab_export:
             st.warning("No data found for the selected accounts.")
     else:
         st.info("Please select or paste accounts to begin.")
-
-    
